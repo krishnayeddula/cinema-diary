@@ -1,0 +1,27 @@
+[project]
+name = "cinema-diary"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "krishnayeddula", email = "krishnayeddula@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+]
+
+[project.scripts]
+cinema-diary = "cinema_diary:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170.15",
+    "pre-commit>=4.7.0",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
