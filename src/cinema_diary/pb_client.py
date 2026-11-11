@@ -151,6 +151,9 @@ class PocketBaseClient:
             "PATCH", f"/api/collections/{collection}/records/{record_id}", json=data
         )
 
+    def delete(self, collection: str, record_id: str) -> None:
+        self._request("DELETE", f"/api/collections/{collection}/records/{record_id}")
+
     def upsert(self, collection: str, record_id: str, data: dict) -> dict:
         """Update the record if it exists, otherwise create it with this id.
 

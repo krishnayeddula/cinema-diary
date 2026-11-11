@@ -188,3 +188,16 @@ def test_upsert_updates_when_present():
     client, _ = make_client(handler)
     client.upsert("movies", "x", {"title": "updated"})
     assert [r.method for r in seen] == ["PATCH"]  # no create on rerun
+
+
+def test_delete_sends_delete_and_returns_none():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(204)
+
+    client, _ = make_client(handler)
+    assert client.delete("reviews", "abc") is None
+    assert seen[0].method == "DELETE"
+    assert seen[0].url.path == "/api/collections/reviews/records/abc"
