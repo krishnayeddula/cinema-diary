@@ -28,7 +28,14 @@ pytestmark = pytest.mark.skipif(
     reason="live PocketBase env vars not set",
 )
 
-DIARY = ["taste_profile", "favorites", "watches", "reviews", "watchlist"]
+DIARY = [
+    "taste_profile",
+    "favorites",
+    "watches",
+    "reviews",
+    "watchlist",
+    "curated_items",
+]
 
 
 def login(collection, email_var, password_var):
@@ -83,11 +90,21 @@ def alice_rows(alice, ids):
         },
         "reviews": {"user": me, "movie": ids["movie2"], "stars": 4},
         "watchlist": {"user": me, "movie": ids["movie"]},
+        "curated_items": {"user": me, "movie": ids["movie2"], "rank": 1, "score": 5},
     }
-    created = {c: alice.create(c, data) for c, data in rows.items()}
-    yield created
-    for c, rec in created.items():
-        alice.delete(c, rec["id"])
+    # alice is a test-only account: clear leftovers from any interrupted run
+    for c in rows:
+        for old in list(alice.list_all(c)):
+            alice.delete(c, old["id"])
+
+    created = {}
+    try:
+        for c, data in rows.items():
+            created[c] = alice.create(c, data)
+        yield created
+    finally:  # clean up even if a create above failed
+        for c, rec in created.items():
+            alice.delete(c, rec["id"])
 
 
 @pytest.fixture
