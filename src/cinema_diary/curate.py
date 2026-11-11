@@ -10,8 +10,10 @@ Scoring (every point comes with a human-readable reason):
     +1  per matching genre (max 2)
     +1  from one of your eras
     +1  already on your watchlist
-Films you have watched or reviewed are skipped. No AI here: the same input
-always gives the same list. Ranking with a local model comes in P5.
+Skipped: films you have watched or reviewed, and films not released yet.
+Diversity: at most 3 films per favorite person, so one director/composer
+pair cannot fill the whole list. No AI here: the same input always gives
+the same list. Ranking with a local model comes in P5.
 """
 
 from __future__ import annotations
@@ -20,8 +22,10 @@ import argparse
 import getpass
 import os
 import sys
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from cinema_diary.importer import ROLE_JOBS
 from cinema_diary.pb_client import PocketBaseClient
@@ -34,6 +38,7 @@ W_ERA = 1
 W_WATCHLIST = 1
 MIN_SCORE = 2
 DEFAULT_TOP = 25
+MAX_PER_FAVORITE = 3
 
 ROLE_VERB = {
     "director": "Directed by",
@@ -79,6 +84,7 @@ class Pick:
     year: int
     score: int
     reasons: list[str]
+    favorites: list[str] = field(default_factory=list)  # the favorite-person reasons
 
 
 # --- pure scoring (no I/O, easy to test) -------------------------------------
@@ -113,6 +119,29 @@ def favorite_hits(
     return hits
 
 
+def is_released(movie: dict, today: str) -> bool:
+    """Released on or before today (ISO dates compare correctly as strings)."""
+    release = movie.get("release_date") or ""
+    return bool(release) and release <= today
+
+
+def diversify(picks: list[Pick], top: int, cap: int = MAX_PER_FAVORITE) -> list[Pick]:
+    """Keep ranking order, but allow at most `cap` films per favorite person.
+    Films held back by the cap only fill leftover slots at the end."""
+    chosen: list[Pick] = []
+    held_back: list[Pick] = []
+    counts: Counter[str] = Counter()
+    for p in picks:
+        if len(chosen) == top:
+            break
+        if any(counts[f] >= cap for f in p.favorites):
+            held_back.append(p)
+            continue
+        chosen.append(p)
+        counts.update(p.favorites)
+    return chosen + held_back[: top - len(chosen)]
+
+
 def score_movies(
     movies: Iterable[dict],
     hits: dict[str, list[str]],
@@ -120,10 +149,12 @@ def score_movies(
     seen: set[str],
     watchlist: set[str],
     top: int = DEFAULT_TOP,
+    today: str | None = None,
 ) -> list[Pick]:
+    today = today or datetime.now(UTC).date().isoformat()
     picks = []
     for m in movies:
-        if m["id"] in seen:
+        if m["id"] in seen or not is_released(m, today):
             continue
         score, reasons = 0, []
 
@@ -152,11 +183,18 @@ def score_movies(
 
         if score >= MIN_SCORE:
             picks.append(
-                Pick(m["id"], m.get("title", ""), m.get("year") or 0, score, reasons)
+                Pick(
+                    m["id"],
+                    m.get("title", ""),
+                    m.get("year") or 0,
+                    score,
+                    reasons,
+                    list(fav_reasons),
+                )
             )
 
     picks.sort(key=lambda p: (-p.score, -p.year, p.title))
-    return picks[:top]
+    return diversify(picks, top)
 
 
 # --- loading and saving (runs as the logged-in user) -------------------------
