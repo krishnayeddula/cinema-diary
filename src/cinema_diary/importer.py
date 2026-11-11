@@ -2,11 +2,15 @@
 
 Usage:
     uv run python -m cinema_diary.importer "Satyajit Ray" "David Fincher"
+    uv run python -m cinema_diary.importer --role composer --language ta "Ilaiyaraaja"
+    uv run python -m cinema_diary.importer --role actor --limit 25 "Savitri"
     uv run python -m cinema_diary.importer --person-id 12160
 
-For each director: find them on TMDB, list the movies they directed, then
-for each movie fetch details + credits (one TMDB call) and upsert into
-PocketBase: movies, people, credits.
+A seed is a person plus a role. For each seed: find the person on TMDB,
+take the films where they had that role (most popular first, capped by
+--limit, optionally only some languages), then for each film fetch details
++ credits (one TMDB call) and upsert into PocketBase: movies, people,
+credits. One hop only: we do not follow the people we find.
 
 Rerun-safe: every record id is derived from a TMDB id, so a second run
 updates the same rows instead of adding new ones.
@@ -48,6 +52,19 @@ KEY_CREW_JOBS = frozenset(
         "Producer",
     }
 )
+
+
+# Which part of a person's TMDB filmography counts for each seed role.
+# "actor" uses the cast list; every other role is a set of crew jobs.
+ROLE_JOBS: dict[str, frozenset[str]] = {
+    "director": frozenset({"Director"}),
+    "composer": frozenset({"Original Music Composer", "Music", "Music Director"}),
+    "lyricist": frozenset({"Lyricist", "Songs"}),
+    "writer": frozenset({"Screenplay", "Writer", "Story", "Dialogue"}),
+    "cinematographer": frozenset({"Director of Photography"}),
+}
+ROLES = ("actor", *ROLE_JOBS)
+DEFAULT_LIMIT = 40
 
 
 class RecordStore(Protocol):
@@ -101,6 +118,31 @@ def credit_record(c: dict, kind: str, movie_rid: str, person_rid: str) -> dict:
     }
 
 
+def pick_filmography(
+    credits: dict,
+    role: str,
+    limit: int = DEFAULT_LIMIT,
+    languages: frozenset[str] | None = None,
+) -> list[int]:
+    """Movie ids for a person's role: most popular first, capped, deduplicated."""
+    if role == "actor":
+        entries = credits.get("cast", [])
+    elif role in ROLE_JOBS:
+        jobs = ROLE_JOBS[role]
+        entries = [c for c in credits.get("crew", []) if c.get("job") in jobs]
+    else:
+        raise ValueError(f"unknown role {role!r}; choose from {', '.join(ROLES)}")
+
+    if languages:
+        entries = [c for c in entries if c.get("original_language") in languages]
+
+    best: dict[int, float] = {}
+    for c in entries:
+        best[c["id"]] = max(best.get(c["id"], 0.0), c.get("popularity") or 0.0)
+    ranked = sorted(best, key=lambda mid: (-best[mid], mid))
+    return ranked[:limit]
+
+
 def select_credits(credits: dict) -> list[tuple[str, dict]]:
     """Top-billed cast plus key crew, as (kind, credit) pairs."""
     cast = sorted(credits.get("cast", []), key=lambda c: c.get("order", 999))
@@ -142,13 +184,16 @@ class Importer:
         )
         return top
 
-    def directed_movie_ids(self, person_id: int) -> list[int]:
-        crew = self.tmdb.person_movie_credits(person_id).get("crew", [])
-        return sorted({c["id"] for c in crew if c.get("job") == "Director"})
-
-    def import_director(self, person_id: int) -> None:
-        movie_ids = self.directed_movie_ids(person_id)
-        log.info("person %s: %d directed movies", person_id, len(movie_ids))
+    def import_person(
+        self,
+        person_id: int,
+        role: str = "director",
+        limit: int = DEFAULT_LIMIT,
+        languages: frozenset[str] | None = None,
+    ) -> None:
+        credits = self.tmdb.person_movie_credits(person_id)
+        movie_ids = pick_filmography(credits, role, limit, languages)
+        log.info("person %s as %s: %d movies", person_id, role, len(movie_ids))
         for i, movie_id in enumerate(movie_ids, 1):
             self.import_movie(movie_id)
             log.info("  [%d/%d] movie %s done", i, len(movie_ids), movie_id)
@@ -189,10 +234,25 @@ def _count(pb: PocketBaseClient, collection: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Import directors' films from TMDB.")
-    parser.add_argument("names", nargs="*", help="director names, e.g. 'Satyajit Ray'")
+    parser = argparse.ArgumentParser(description="Import a person's films from TMDB.")
+    parser.add_argument("names", nargs="*", help="person names, e.g. 'Satyajit Ray'")
     parser.add_argument(
         "--person-id", type=int, action="append", default=[], help="TMDB person id"
+    )
+    parser.add_argument(
+        "--role", choices=ROLES, default="director", help="which filmography to seed"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT,
+        help=f"max films per person, most popular first (default {DEFAULT_LIMIT})",
+    )
+    parser.add_argument(
+        "--language",
+        action="append",
+        default=[],
+        help="only films in this original language (repeatable), e.g. te",
     )
     args = parser.parse_args(argv)
     if not args.names and not args.person_id:
@@ -214,8 +274,9 @@ def main(argv: list[str] | None = None) -> int:
 
         person_ids = list(args.person_id)
         person_ids += [importer.resolve_person(n)["id"] for n in args.names]
+        languages = frozenset(args.language) or None
         for pid in person_ids:
-            importer.import_director(pid)
+            importer.import_person(pid, args.role, args.limit, languages)
 
         s = importer.stats
         log.info(

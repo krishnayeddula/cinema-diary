@@ -1,10 +1,13 @@
 """Importer tests with a fake TMDB and an in-memory PocketBase.
 The key test: running the import twice leaves the same rows."""
 
+import pytest
+
 from cinema_diary.importer import (
     MAX_CAST,
     Importer,
     movie_record,
+    pick_filmography,
     select_credits,
 )
 from cinema_diary.pb_client import derived_id
@@ -83,7 +86,7 @@ class FakePB:
 
 def run_import(pb):
     importer = Importer(FakeTMDB(), pb)
-    importer.import_director(importer.resolve_person("Satyajit Ray")["id"])
+    importer.import_person(importer.resolve_person("Satyajit Ray")["id"], "director")
     return importer
 
 
@@ -151,3 +154,58 @@ def test_select_credits_caps_cast_and_filters_crew():
     assert len(cast) == MAX_CAST
     assert cast[0]["order"] == 0
     assert [c["job"] for c in crew] == ["Lyricist"]
+
+
+# --- role-based seeds --------------------------------------------------------
+
+FILMOGRAPHY = {
+    "cast": [
+        {"id": 10, "popularity": 5.0, "original_language": "te"},
+        {"id": 11, "popularity": 9.0, "original_language": "ta"},
+    ],
+    "crew": [
+        {"id": 20, "job": "Director", "popularity": 1.0, "original_language": "te"},
+        {
+            "id": 21,
+            "job": "Original Music Composer",
+            "popularity": 3.0,
+            "original_language": "ta",
+        },
+        {"id": 22, "job": "Music", "popularity": 7.0, "original_language": "te"},
+        {"id": 22, "job": "Songs", "popularity": 7.0, "original_language": "te"},
+        {"id": 23, "job": "Lyricist", "popularity": 2.0, "original_language": "te"},
+    ],
+}
+
+
+def test_actor_role_uses_cast_most_popular_first():
+    assert pick_filmography(FILMOGRAPHY, "actor") == [11, 10]
+
+
+def test_composer_role_uses_music_jobs():
+    assert pick_filmography(FILMOGRAPHY, "composer") == [22, 21]
+
+
+def test_lyricist_role_includes_songs_and_dedupes():
+    assert pick_filmography(FILMOGRAPHY, "lyricist") == [22, 23]
+
+
+def test_director_role_only_directing_credits():
+    assert pick_filmography(FILMOGRAPHY, "director") == [20]
+
+
+def test_limit_caps_big_filmographies():
+    big = {"cast": [{"id": i, "popularity": float(i)} for i in range(500)]}
+    picked = pick_filmography(big, "actor", limit=40)
+    assert len(picked) == 40
+    assert picked[0] == 499  # most popular first
+
+
+def test_language_filter():
+    langs = frozenset({"te"})
+    assert pick_filmography(FILMOGRAPHY, "composer", languages=langs) == [22]
+
+
+def test_unknown_role_rejected():
+    with pytest.raises(ValueError):
+        pick_filmography(FILMOGRAPHY, "caterer")
